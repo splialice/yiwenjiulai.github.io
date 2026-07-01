@@ -229,7 +229,7 @@ jobs:
               <meta http-equiv="refresh" content="0; url=${url}">
               <script>window.location.href = "${url}";</script>
               <link rel="canonical" href="${url}">
-              <meta name="robots" content="index, follow">
+              <meta name="robots" content="noindex, follow">
           </head>
           <body>
               <p>正在跳转到原文：<a href="${url}">${url}</a></p>
