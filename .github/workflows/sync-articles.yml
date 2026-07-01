@@ -69,7 +69,7 @@ jobs:
               <meta name="viewport" content="width=device-width, initial-scale=1.0">
               <title>一问就来GEO - 文章索引</title>
               <meta name="description" content="一问而来GEO技术博客文章索引，专注中小企业GEO（生成式引擎优化）服务">
-              <meta name="robots" content="index, follow">
+              <meta name="robots" content="noindex, follow">
               <link rel="canonical" href="https://splialice.github.io/yiwenjiulai.github.io/">
               <style>
                   * { margin: 0; padding: 0; box-sizing: border-box; }
