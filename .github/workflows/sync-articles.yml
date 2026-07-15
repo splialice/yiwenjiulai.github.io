@@ -21,36 +21,55 @@ jobs:
         id: fetch_articles
         run: |
           echo "📡 正在从主站拉取最新文章..."
-          URL="https://yiwenjiulai.cn/admin/articles_feed.php?format=json&days=30&limit=100"
 
-          # 获取响应 body 和 http status
-          RESPONSE_RAW=$(curl -sS -w "\n%{http_code}" "$URL") || true
-          HTTP_CODE=$(printf '%s' "$RESPONSE_RAW" | tail -n1)
-          RESPONSE=$(printf '%s' "$RESPONSE_RAW" | sed '$d')
+          # 建议直接使用带 www 的 canonical 域，避免重定向
+          URL="https://www.yiwenjiulai.cn/admin/articles_feed.php?format=json&days=30&limit=100"
+
+          TMP_RESP="$(mktemp)"
+          MAX_RETRY=3
+          SLEEP_BASE=2
+          http_status=""
+
+          for i in $(seq 1 $MAX_RETRY); do
+            # -sS 静默但在出错时显示错误，-L 跟随重定向，-m 设置超时，-w 输出状态码
+            http_status=$(curl -sS -L -m 15 -w "%{http_code}" -o "$TMP_RESP" "$URL" || echo "000")
+            if [ "$http_status" -ge 200 ] && [ "$http_status" -lt 400 ]; then
+              break
+            fi
+            echo "⚠️ 第 $i 次尝试，HTTP 状态：$http_status。等待后重试..."
+            sleep $((SLEEP_BASE * i))
+          done
+
+          RESPONSE="$(cat "$TMP_RESP" || true)"
+
+          # 保留响应文件以便后续步骤使用/调试
+          cp "$TMP_RESP" articles_data.json || true
 
           # 检查 HTTP 状态
-          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
-            echo "::error::无法获取文章数据，主站返回 HTTP 状态 $HTTP_CODE"
-            echo "响应（前 1k 字节）:"
-            echo "$RESPONSE" | head -c 1024
+          if [ -z "$http_status" ] || [ "$http_status" -eq 000 ] || [ "$http_status" -ge 400 ]; then
+            echo "::error::无法获取文章数据（HTTP 状态 $http_status）"
+            echo "响应预览："
+            head -n 200 "$TMP_RESP" || true
+            rm -f "$TMP_RESP"
             exit 1
           fi
 
-          # 验证 JSON 格式
-          if ! printf '%s' "$RESPONSE" | jq . >/dev/null 2>&1; then
-            echo "::error::主站返回的内容不是合法 JSON，无法解析"
-            echo "响应（前 1k 字节）:"
-            echo "$RESPONSE" | head -c 1024
+          # 验证是否为合法 JSON
+          if ! echo "$RESPONSE" | jq empty >/dev/null 2>&1; then
+            echo "::error::上游返回的不是有效 JSON，jq 解析失败。响应预览："
+            head -n 200 "$TMP_RESP" || true
+            rm -f "$TMP_RESP"
             exit 1
           fi
 
-          # 保存响应
-          echo "$RESPONSE" > articles_data.json
-
-          # 提取文章数量（使用安全默认）
-          COUNT=$(jq -r '.query.count // 0' articles_data.json)
+          # 提取文章数量（兼容不同返回结构）
+          COUNT=$(echo "$RESPONSE" | jq -r '.query.count // (.articles | length) // 0')
           echo "✅ 成功获取 $COUNT 篇文章"
           echo "article_count=$COUNT" >> $GITHUB_OUTPUT
+
+          # 保证文件存在供后续步骤使用
+          echo "$RESPONSE" > articles_data.json
+          rm -f "$TMP_RESP"
 
       - name: Generate GitHub Pages content
         run: |
@@ -59,202 +78,199 @@ jobs:
           # 1. 生成文章索引 JSON（原始数据）
           cp articles_data.json github-pages/articles.json
 
-          # 2. 生成 sitemap.xml
+          # 2. 生成 sitemap.xml（使用 jq 安全提取字段，做简单转义）
           cat > github-pages/sitemap.xml << 'XMLEOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-          XMLEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+XMLEOF
 
-          # 用 jq 解析 JSON 并生成 sitemap 条目（使用 // 提供默认值避免空字段）
-          cat articles_data.json | jq -r '
-            (.articles // [])[] |
-            "  <url>\n    <loc>" + (.url // "") + "</loc>\n    <lastmod>" + (.updated_at // .published_at // "") + "</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.8</priority>\n  </url>"
-          ' >> github-pages/sitemap.xml
+          # 使用 jq 生成 sitemap 条目，确保字段存在
+          jq -r '
+            .articles[] |
+            "<url>\n  <loc>\(.url|gsub("&"; "&amp;"))</loc>\n  <lastmod>\(.updated_at // .published_at // "")</lastmod>\n  <changefreq>weekly</changefreq>\n  <priority>0.8</priority>\n</url>"
+          ' articles_data.json >> github-pages/sitemap.xml
 
           echo '</urlset>' >> github-pages/sitemap.xml
 
           # 3. 生成文章列表 HTML 页面
           cat > github-pages/index.html << 'HTMLEOF'
-          <!DOCTYPE html>
-          <html lang="zh-CN">
-          <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>一问就来GEO - 文章索引</title>
-              <meta name="description" content="一问而来GEO技术博客文章索引，专注中小企业GEO（生成式引擎优化）服务">
-              <meta name="robots" content="noindex, follow">
-              <link rel="canonical" href="https://splialice.github.io/yiwenjiulai.github.io/">
-              <style>
-                  * { margin: 0; padding: 0; box-sizing: border-box; }
-                  body {
-                      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                      line-height: 1.6;
-                      color: #333;
-                      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                      min-height: 100vh;
-                      padding: 20px;
-                  }
-                  .container { max-width: 1200px; margin: 0 auto; }
-                  header {
-                      background: white;
-                      padding: 40px;
-                      border-radius: 16px;
-                      box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-                      margin-bottom: 30px;
-                      text-align: center;
-                  }
-                  h1 { color: #667eea; font-size: 32px; margin-bottom: 12px; }
-                  .subtitle { color: #666; font-size: 16px; }
-                  .stats {
-                      display: flex;
-                      justify-content: center;
-                      gap: 30px;
-                      margin-top: 20px;
-                      flex-wrap: wrap;
-                  }
-                  .stat-item {
-                      text-align: center;
-                      padding: 15px 25px;
-                      background: #f8f9fa;
-                      border-radius: 12px;
-                  }
-                  .stat-number { font-size: 28px; font-weight: bold; color: #667eea; }
-                  .stat-label { font-size: 13px; color: #666; margin-top: 5px; }
-                  .articles-grid {
-                      display: grid;
-                      grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-                      gap: 20px;
-                  }
-                  article {
-                      background: white;
-                      padding: 24px;
-                      border-radius: 12px;
-                      box-shadow: 0 4px 16px rgba(0,0,0,0.08);
-                      transition: transform 0.3s, box-shadow 0.3s;
-                  }
-                  article:hover {
-                      transform: translateY(-4px);
-                      box-shadow: 0 8px 24px rgba(0,0,0,0.15);
-                  }
-                  h2 { font-size: 18px; margin-bottom: 10px; color: #333; }
-                  h2 a { color: inherit; text-decoration: none; }
-                  h2 a:hover { color: #667eea; }
-                  .meta {
-                      display: flex;
-                      gap: 12px;
-                      flex-wrap: wrap;
-                      margin-bottom: 12px;
-                      font-size: 13px;
-                      color: #888;
-                  }
-                  .tag {
-                      display: inline-block;
-                      padding: 3px 10px;
-                      background: #f0f0ff;
-                      color: #667eea;
-                      border-radius: 20px;
-                      font-size: 12px;
-                  }
-                  .description { color: #555; font-size: 14px; line-height: 1.6; }
-                  footer {
-                      text-align: center;
-                      padding: 30px;
-                      color: white;
-                      font-size: 14px;
-                  }
-                  footer a { color: white; text-decoration: underline; }
-                  @media (max-width: 768px) {
-                      .articles-grid { grid-template-columns: 1fr; }
-                      header { padding: 24px; }
-                      h1 { font-size: 24px; }
-                  }
-              </style>
-          </head>
-          <body>
-              <div class="container">
-                  <header>
-                      <h1>🚀 一问而来 GEO 技术博客</h1>
-                      <p class="subtitle">专注中小企业GEO（生成式引擎优化）服务 · AI搜索时代的新SEO</p>
-                      <div class="stats">
-                          <div class="stat-item">
-                              <div class="stat-number" id="article-count">--</div>
-                              <div class="stat-label">篇文章</div>
-                          </div>
-                          <div class="stat-item">
-                              <div class="stat-number">--</div>
-                              <div class="stat-label">最后更新</div>
-                          </div>
-                      </div>
-                  </header>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>一问就来GEO - 文章索引</title>
+    <meta name="description" content="一问而来GEO技术博客文章索引，专注中小企业GEO（生成式引擎优化）服务">
+    <meta name="robots" content="noindex, follow">
+    <link rel="canonical" href="https://splialice.github.io/yiwenjiulai.github.io/">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        header {
+            background: white;
+            padding: 40px;
+            border-radius: 16px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        h1 { color: #667eea; font-size: 32px; margin-bottom: 12px; }
+        .subtitle { color: #666; font-size: 16px; }
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+        .stat-item {
+            text-align: center;
+            padding: 15px 25px;
+            background: #f8f9fa;
+            border-radius: 12px;
+        }
+        .stat-number { font-size: 28px; font-weight: bold; color: #667eea; }
+        .stat-label { font-size: 13px; color: #666; margin-top: 5px; }
+        .articles-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+        article {
+            background: white;
+            padding: 24px;
+            border-radius: 12px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        article:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+        }
+        h2 { font-size: 18px; margin-bottom: 10px; color: #333; }
+        h2 a { color: inherit; text-decoration: none; }
+        h2 a:hover { color: #667eea; }
+        .meta {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+            font-size: 13px;
+            color: #888;
+        }
+        .tag {
+            display: inline-block;
+            padding: 3px 10px;
+            background: #f0f0ff;
+            color: #667eea;
+            border-radius: 20px;
+            font-size: 12px;
+        }
+        .description { color: #555; font-size: 14px; line-height: 1.6; }
+        footer {
+            text-align: center;
+            padding: 30px;
+            color: white;
+            font-size: 14px;
+        }
+        footer a { color: white; text-decoration: underline; }
+        @media (max-width: 768px) {
+            .articles-grid { grid-template-columns: 1fr; }
+            header { padding: 24px; }
+            h1 { font-size: 24px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 一问而来 GEO 技术博客</h1>
+            <p class="subtitle">专注中小企业GEO（生成式引擎优化）服务 · AI搜索时代的新SEO</p>
+            <div class="stats">
+                <div class="stat-item">
+                    <div class="stat-number" id="article-count">--</div>
+                    <div class="stat-label">篇文章</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">--</div>
+                    <div class="stat-label">最后更新</div>
+                </div>
+            </div>
+        </header>
 
-                  <div class="articles-grid" id="articles-container">
-                      <!-- 文章列表将通过 JS 动态加载 -->
-                  </div>
+        <div class="articles-grid" id="articles-container">
+            <!-- 文章列表将通过 JS 动态加载 -->
+        </div>
 
-                  <footer>
-                      <p>本页面由 <a href="https://github.com/splialice/yiwenjiulai.github.io">GitHub Actions</a> 自动同步更新</p>
-                      <p style="margin-top:10px;">访问完整网站：<a href="https://yiwenjiulai.cn">yiwenjiulai.cn</a></p>
-                  </footer>
-              </div>
+        <footer>
+            <p>本页面由 <a href="https://github.com/splialice/yiwenjiulai.github.io">GitHub Actions</a> 自动同步更新</p>
+            <p style="margin-top:10px;">访问完整网站：<a href="https://yiwenjiulai.cn">yiwenjiulai.cn</a></p>
+        </footer>
+    </div>
 
-              <script>
-                  // 加载文章数据
-                  fetch('./articles.json')
-                      .then(response => response.json())
-                      .then(data => {
-                          // 更新统计信息
-                          document.getElementById('article-count').textContent = data.query.count;
+    <script>
+        // 加载文章数据
+        fetch('./articles.json')
+            .then(response => response.json())
+            .then(data => {
+                // 更新统计信息
+                document.getElementById('article-count').textContent = data.query?.count ?? data.articles?.length ?? '--';
 
-                          const now = new Date();
-                          document.querySelectorAll('.stat-number')[1].textContent =
-                              now.getFullYear() + '-' +
-                              String(now.getMonth() + 1).padStart(2, '0') + '-' +
-                              String(now.getDate()).padStart(2, '0');
+                const now = new Date();
+                document.querySelectorAll('.stat-number')[1].textContent =
+                    now.getFullYear() + '-' +
+                    String(now.getMonth() + 1).padStart(2, '0') + '-' +
+                    String(now.getDate()).padStart(2, '0');
 
-                          // 渲染文章列表
-                          const container = document.getElementById('articles-container');
-                          container.innerHTML = data.articles.map(article => `
-                              <article>
-                                  <h2><a href="${article.url}" target="_blank" rel="noopener">${article.title}</a></h2>
-                                  <div class="meta">
-                                      <span>${article.category}</span>
-                                      <span class="tag">${article.published_at}</span>
-                                  </div>
-                                  <p class="description">${article.description}</p>
-                              </article>
-                          `).join('');
-                      })
-                      .catch(error => console.error('加载失败:', error));
-              </script>
-          </body>
-          </html>
-          HTMLEOF
+                // 渲染文章列表
+                const container = document.getElementById('articles-container');
+                container.innerHTML = (data.articles || []).map(article => `
+                    <article>
+                        <h2><a href="${article.url}" target="_blank" rel="noopener">${article.title}</a></h2>
+                        <div class="meta">
+                            <span>${article.category || ''}</span>
+                            <span class="tag">${article.published_at || ''}</span>
+                        </div>
+                        <p class="description">${article.description || ''}</p>
+                    </article>
+                `).join('');
+            })
+            .catch(error => console.error('加载失败:', error));
+    </script>
+</body>
+</html>
+HTMLEOF
 
           # 4. 为每篇文章创建单独的重定向页（301 跳转到主站）
           mkdir -p github-pages/articles
 
-          # 使用 TSV 输出 slug 和 url，然后用 IFS 读取，避免 URL 中的空格导致解析错误
-          jq -r '.articles[]? | [.slug, .url] | @tsv' articles_data.json | while IFS=$'\t' read -r slug url; do
-              if [ -z "$slug" ] || [ -z "$url" ]; then
-                echo "::warning::跳过一个缺失 slug 或 url 的文章记录"
-                continue
-              fi
-
-              cat > "github-pages/articles/${slug}.html" <<REDIRECT_EOF
-          <!DOCTYPE html>
-          <html lang="zh-CN">
-          <head>
-              <meta charset="UTF-8">
-              <meta http-equiv="refresh" content="0; url=${url}">
-              <script>window.location.href = "${url}";</script>
-              <link rel="canonical" href="${url}">
-              <meta name="robots" content="noindex, follow">
-          </head>
-          <body>
-              <p>正在跳转到原文：<a href="${url}">${url}</a></p>
-          </body>
-          </html>
-          REDIRECT_EOF
+          # 使用 @tsv 安全输出 slug 和 url，然后逐个生成文件
+          jq -r '.articles[] | [.slug, .url] | @tsv' articles_data.json | while IFS=$'\t' read -r slug url; do
+            # 对 slug 做最小清洗以避免文件名中非法字符
+            safe_slug=$(echo "$slug" | sed 's/[^a-zA-Z0-9._-]/-/g')
+            cat > "github-pages/articles/${safe_slug}.html" <<REDIRECT_EOF
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="0; url=${url}">
+  <script>window.location.href = "${url}";</script>
+  <link rel="canonical" href="${url}">
+  <meta name="robots" content="noindex, follow">
+</head>
+<body>
+  <p>正在跳转到原文：<a href="${url}">${url}</a></p>
+</body>
+</html>
+REDIRECT_EOF
           done
 
           echo "✅ GitHub Pages 内容生成完成"
@@ -273,15 +289,13 @@ jobs:
         run: |
           echo "📢 正在通过 IndexNow 通知搜索引擎..."
 
-          # 生成 urlList 的 JSON 数组（紧凑格式）
-          URL_LIST_JSON=$(jq -c '[ .articles[]?.url ]' articles_data.json)
-
-          # 构造 payload 并 POST（使用 jq 确保合法 JSON）
-          PAYLOAD=$(jq -n --arg host "splialice.github.io" --arg key "51773d28057a42208253a6c1daeeedf2" --argjson urls "$URL_LIST_JSON" '{host: $host, key: $key, urlList: $urls}')
+          # 使用 jq 构造安全的 JSON 请求体
+          INDEXNOW_KEY="51773d28057a42208253a6c1daeeedf2"
+          BODY=$(jq -c --arg host "splialice.github.io" --arg key "$INDEXNOW_KEY" '{host:$host, key:$key, urlList: [.articles[].url]}' articles_data.json)
 
           curl -s -X POST "https://api.indexnow.org/IndexNow" \
             -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
+            -d "${BODY}"
 
           echo "✅ IndexNow 推送完成"
 
