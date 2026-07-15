@@ -21,73 +21,58 @@ jobs:
         id: fetch_articles
         run: |
           echo "📡 正在从主站拉取最新文章..."
+          URL="https://yiwenjiulai.cn/admin/articles_feed.php?format=json&days=30&limit=100"
 
-          # 从主站 API 获取最近 30 天的文章（带调试信息）
-          HTTP_CODE=$(curl -s -o response_body.txt -w "%{http_code}" \
-            -H "User-Agent: GitHub-Actions-Sync/1.0" \
-            --connect-timeout 10 \
-            --max-time 30 \
-            "https://www.yiwenjiulai.cn/admin/articles_feed.php?format=json&days=30&limit=100")
+          # 获取响应 body 和 http status
+          RESPONSE_RAW=$(curl -sS -w "\n%{http_code}" "$URL") || true
+          HTTP_CODE=$(printf '%s' "$RESPONSE_RAW" | tail -n1)
+          RESPONSE=$(printf '%s' "$RESPONSE_RAW" | sed '$d')
 
-          echo "📊 HTTP状态码: $HTTP_CODE"
-
-          # 读取响应内容
-          RESPONSE=$(cat response_body.txt)
-
-          # 调试输出：显示前200个字符（不泄露敏感信息）
-          echo "🔍 响应内容预览（前200字符）:"
-          echo "${RESPONSE:0:200}" | head -c 200
-          echo ""
-
-          # 检查HTTP状态码
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::HTTP请求失败，状态码: $HTTP_CODE"
-            echo "::error::响应内容: ${RESPONSE:0:500}"
+          # 检查 HTTP 状态
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::无法获取文章数据，主站返回 HTTP 状态 $HTTP_CODE"
+            echo "响应（前 1k 字节）:"
+            echo "$RESPONSE" | head -c 1024
             exit 1
           fi
 
-          # 检查响应是否为空
-          if [ -z "$RESPONSE" ]; then
-            echo "::error::无法获取文章数据，主站可能不可用"
+          # 验证 JSON 格式
+          if ! printf '%s' "$RESPONSE" | jq . >/dev/null 2>&1; then
+            echo "::error::主站返回的内容不是合法 JSON，无法解析"
+            echo "响应（前 1k 字节）:"
+            echo "$RESPONSE" | head -c 1024
             exit 1
           fi
 
-          # 检查是否为有效JSON（简单验证）
-          if ! echo "$RESPONSE" | jq empty > /dev/null 2>&1; then
-            echo "::error::响应不是有效的JSON格式"
-            echo "::error::原始响应内容:"
-            echo "$RESPONSE" | head -c 1000
-            exit 1
-          fi
-
-          # 保存响应到文件供后续步骤使用
+          # 保存响应
           echo "$RESPONSE" > articles_data.json
 
-          # 提取文章数量
-          COUNT=$(echo "$RESPONSE" | jq '.query.count')
+          # 提取文章数量（使用安全默认）
+          COUNT=$(jq -r '.query.count // 0' articles_data.json)
           echo "✅ 成功获取 $COUNT 篇文章"
           echo "article_count=$COUNT" >> $GITHUB_OUTPUT
+
       - name: Generate GitHub Pages content
         run: |
           mkdir -p github-pages
-          
+
           # 1. 生成文章索引 JSON（原始数据）
           cp articles_data.json github-pages/articles.json
-          
+
           # 2. 生成 sitemap.xml
           cat > github-pages/sitemap.xml << 'XMLEOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
           XMLEOF
-          
-          # 用 jq 解析 JSON 并生成 sitemap 条目
+
+          # 用 jq 解析 JSON 并生成 sitemap 条目（使用 // 提供默认值避免空字段）
           cat articles_data.json | jq -r '
-            .articles[] |
-            "  <url>\n    <loc>" + .url + "</loc>\n    <lastmod>" + .updated_at + "</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.8</priority>\n  </url>"
+            (.articles // [])[] |
+            "  <url>\n    <loc>" + (.url // "") + "</loc>\n    <lastmod>" + (.updated_at // .published_at // "") + "</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.8</priority>\n  </url>"
           ' >> github-pages/sitemap.xml
-          
+
           echo '</urlset>' >> github-pages/sitemap.xml
-          
+
           # 3. 生成文章列表 HTML 页面
           cat > github-pages/index.html << 'HTMLEOF'
           <!DOCTYPE html>
@@ -201,14 +186,17 @@ jobs:
                           </div>
                       </div>
                   </header>
+
                   <div class="articles-grid" id="articles-container">
                       <!-- 文章列表将通过 JS 动态加载 -->
                   </div>
+
                   <footer>
                       <p>本页面由 <a href="https://github.com/splialice/yiwenjiulai.github.io">GitHub Actions</a> 自动同步更新</p>
-                      <p style="margin-top:10px;">访问完整网站：<a href="https://www.yiwenjiulai.cn">www.yiwenjiulai.cn</a></p>
+                      <p style="margin-top:10px;">访问完整网站：<a href="https://yiwenjiulai.cn">yiwenjiulai.cn</a></p>
                   </footer>
               </div>
+
               <script>
                   // 加载文章数据
                   fetch('./articles.json')
@@ -216,13 +204,13 @@ jobs:
                       .then(data => {
                           // 更新统计信息
                           document.getElementById('article-count').textContent = data.query.count;
-                          
+
                           const now = new Date();
-                          document.querySelectorAll('.stat-number')[1].textContent = 
-                              now.getFullYear() + '-' + 
+                          document.querySelectorAll('.stat-number')[1].textContent =
+                              now.getFullYear() + '-' +
                               String(now.getMonth() + 1).padStart(2, '0') + '-' +
                               String(now.getDate()).padStart(2, '0');
-                          
+
                           // 渲染文章列表
                           const container = document.getElementById('articles-container');
                           container.innerHTML = data.articles.map(article => `
@@ -241,12 +229,18 @@ jobs:
           </body>
           </html>
           HTMLEOF
-          
+
           # 4. 为每篇文章创建单独的重定向页（301 跳转到主站）
           mkdir -p github-pages/articles
-          
-          cat articles_data.json | jq -r '.articles[] | @uri " \(.slug) \"\(.url)"\"' | while read slug url; do
-              cat > "github-pages/articles/${slug}.html" << REDIRECT_EOF
+
+          # 使用 TSV 输出 slug 和 url，然后用 IFS 读取，避免 URL 中的空格导致解析错误
+          jq -r '.articles[]? | [.slug, .url] | @tsv' articles_data.json | while IFS=$'\t' read -r slug url; do
+              if [ -z "$slug" ] || [ -z "$url" ]; then
+                echo "::warning::跳过一个缺失 slug 或 url 的文章记录"
+                continue
+              fi
+
+              cat > "github-pages/articles/${slug}.html" <<REDIRECT_EOF
           <!DOCTYPE html>
           <html lang="zh-CN">
           <head>
@@ -262,9 +256,10 @@ jobs:
           </html>
           REDIRECT_EOF
           done
-          
+
           echo "✅ GitHub Pages 内容生成完成"
           ls -la github-pages/
+
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
@@ -277,20 +272,19 @@ jobs:
         if: success()
         run: |
           echo "📢 正在通过 IndexNow 通知搜索引擎..."
-          
-          # 获取所有新文章 URL
-          URLS=$(cat articles_data.json | jq -r '.articles[].url' | tr '\n' ',' | sed 's/,$//')
-          
-          # 推送到 IndexNow（Bing + 百度）
+
+          # 生成 urlList 的 JSON 数组（紧凑格式）
+          URL_LIST_JSON=$(jq -c '[ .articles[]?.url ]' articles_data.json)
+
+          # 构造 payload 并 POST（使用 jq 确保合法 JSON）
+          PAYLOAD=$(jq -n --arg host "splialice.github.io" --arg key "51773d28057a42208253a6c1daeeedf2" --argjson urls "$URL_LIST_JSON" '{host: $host, key: $key, urlList: $urls}')
+
           curl -s -X POST "https://api.indexnow.org/IndexNow" \
             -H "Content-Type: application/json" \
-            -d "{
-              \"host\": \"splialice.github.io\",
-              \"key\": \"51773d28057a42208253a6c1daeeedf2\",
-              \"urlList\": $(cat articles_data.json | jq '[.articles[].url]')
-            }"
-          
+            -d "$PAYLOAD"
+
           echo "✅ IndexNow 推送完成"
+
       - name: Summary
         run: |
           echo "## 🎉 同步完成！" >> $GITHUB_STEP_SUMMARY
