@@ -27,7 +27,7 @@ jobs:
             -H "User-Agent: GitHub-Actions-Sync/1.0" \
             --connect-timeout 10 \
             --max-time 30 \
-            "https://yiwenjiulai.cn/admin/articles_feed.php?format=json&days=30&limit=100")
+            "https://www.yiwenjiulai.cn/admin/articles_feed.php?format=json&days=30&limit=100")
 
           echo "📊 HTTP状态码: $HTTP_CODE"
 
@@ -206,7 +206,7 @@ jobs:
                   </div>
                   <footer>
                       <p>本页面由 <a href="https://github.com/splialice/yiwenjiulai.github.io">GitHub Actions</a> 自动同步更新</p>
-                      <p style="margin-top:10px;">访问完整网站：<a href="https://yiwenjiulai.cn">yiwenjiulai.cn</a></p>
+                      <p style="margin-top:10px;">访问完整网站：<a href="https://www.yiwenjiulai.cn">www.yiwenjiulai.cn</a></p>
                   </footer>
               </div>
               <script>
