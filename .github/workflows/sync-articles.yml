@@ -21,24 +21,52 @@ jobs:
         id: fetch_articles
         run: |
           echo "📡 正在从主站拉取最新文章..."
-          
-          # 从主站 API 获取最近 30 天的文章
-          RESPONSE=$(curl -s "https://yiwenjiulai.cn/admin/articles_feed.php?format=json&days=30&limit=100")
-          
-          # 检查响应
+
+          # 从主站 API 获取最近 30 天的文章（带调试信息）
+          HTTP_CODE=$(curl -s -o response_body.txt -w "%{http_code}" \
+            -H "User-Agent: GitHub-Actions-Sync/1.0" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            "https://yiwenjiulai.cn/admin/articles_feed.php?format=json&days=30&limit=100")
+
+          echo "📊 HTTP状态码: $HTTP_CODE"
+
+          # 读取响应内容
+          RESPONSE=$(cat response_body.txt)
+
+          # 调试输出：显示前200个字符（不泄露敏感信息）
+          echo "🔍 响应内容预览（前200字符）:"
+          echo "${RESPONSE:0:200}" | head -c 200
+          echo ""
+
+          # 检查HTTP状态码
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::HTTP请求失败，状态码: $HTTP_CODE"
+            echo "::error::响应内容: ${RESPONSE:0:500}"
+            exit 1
+          fi
+
+          # 检查响应是否为空
           if [ -z "$RESPONSE" ]; then
             echo "::error::无法获取文章数据，主站可能不可用"
             exit 1
           fi
-          
+
+          # 检查是否为有效JSON（简单验证）
+          if ! echo "$RESPONSE" | jq empty > /dev/null 2>&1; then
+            echo "::error::响应不是有效的JSON格式"
+            echo "::error::原始响应内容:"
+            echo "$RESPONSE" | head -c 1000
+            exit 1
+          fi
+
           # 保存响应到文件供后续步骤使用
           echo "$RESPONSE" > articles_data.json
-          
+
           # 提取文章数量
           COUNT=$(echo "$RESPONSE" | jq '.query.count')
           echo "✅ 成功获取 $COUNT 篇文章"
           echo "article_count=$COUNT" >> $GITHUB_OUTPUT
-
       - name: Generate GitHub Pages content
         run: |
           mkdir -p github-pages
@@ -173,17 +201,14 @@ jobs:
                           </div>
                       </div>
                   </header>
-
                   <div class="articles-grid" id="articles-container">
                       <!-- 文章列表将通过 JS 动态加载 -->
                   </div>
-
                   <footer>
                       <p>本页面由 <a href="https://github.com/splialice/yiwenjiulai.github.io">GitHub Actions</a> 自动同步更新</p>
                       <p style="margin-top:10px;">访问完整网站：<a href="https://yiwenjiulai.cn">yiwenjiulai.cn</a></p>
                   </footer>
               </div>
-
               <script>
                   // 加载文章数据
                   fetch('./articles.json')
@@ -240,7 +265,6 @@ jobs:
           
           echo "✅ GitHub Pages 内容生成完成"
           ls -la github-pages/
-
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
@@ -267,7 +291,6 @@ jobs:
             }"
           
           echo "✅ IndexNow 推送完成"
-
       - name: Summary
         run: |
           echo "## 🎉 同步完成！" >> $GITHUB_STEP_SUMMARY
